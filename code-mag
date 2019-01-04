@@ -1,0 +1,222 @@
+##  packages used
+library(randomForest)
+library(gbm)
+
+data2=read.csv(file.choose(),header=T)
+summary(data2) 
+data2$volcano=as.factor(data2$volcano)
+attach(data2)
+####EDA####
+pairs(data2)
+##notes on graphs
+# mag and depth def have a linear relationship
+# depth and angle have some linear relationship aswell
+
+corrplot.mixed(cor(data2[,-5]))
+#some correlation between predictors will negatively effect any linear model
+hist(magnitude) #not normal, a bit skewed to the right
+hist(fault_depth) #not normal, mor unif if anything
+hist(fault_angle) # very normal looking
+hist(fault_length) #very skewed to the right
+
+###  Part A  ###
+#############################   Modeling     ###################################
+##regular regression seems to do okay
+#these did the best relative to k-fold cv
+fit.full=glm(magnitude~.,data=data2)
+summary(fit.full)
+par(mfrow=c(2,2))
+plot(fit.full)
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  cv.error.10[i]=cv.glm(data2,fit.full,K=10)$delta[1]
+}
+mean(cv.error.10)
+
+fit2=glm(magnitude~fault_depth+fault_length,data=data2)
+summary(fit2)
+par(mfrow=c(2,2))
+plot(fit2)
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  cv.error.10[i]=cv.glm(data2,fit2,K=10)$delta[1]
+}
+mean(cv.error.10)
+
+fit.depth=glm(magnitude~poly(fault_depth,2),data=data2)
+summary(fit.depth)
+par(mfrow=c(2,2))
+plot(fit.depth)
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  cv.error.10[i]=cv.glm(data2,fit.depth,K=10)$delta[1]
+}
+mean(cv.error.10)
+
+fit.length=glm(magnitude~fault_length,data=data2)
+summary(fit.length)
+par(mfrow=c(2,2))
+plot(fit.length)
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  cv.error.10[i]=cv.glm(data2,fit.length,K=10)$delta[1]
+}
+mean(cv.error.10)
+dev.off()
+
+
+######     Trees did much better in predicting     ######
+################################################################################
+##############             RANDOM FOREST!!!       ##############################
+################################################################################
+##choosing mtry using k-vold cv
+k=10
+p=dim(data2)[2]-1
+n=floor(nrow(data2)/k)
+err=rep(NA,k)
+cv.mtry.test=rep(NA,ncol = p)
+for (m in 1:p){
+    for (i in 1:k){
+      start=((i-1)*n+1) #start of subset
+      end=(i*n) #end of subset
+      test=start:end #range of subset
+      
+      cv.train=data2[-test,]
+      cv.test=data2[test,]
+      
+      fit=randomForest(magnitude~.,data=cv.train,mtry=m,ntree=1000)
+      prediction=predict(fit,newdata=cv.test[,-1])
+      err[i]=mean((prediction-cv.test[,1])^2)
+      
+    }
+    cv.mtry.test[m]=mean(err)
+  }
+cv.mtry.test
+plot(1:4,cv.mtry.test,pch=19,col="blue",type="b",
+     ylab="CV Error",xlab = "Mtry")
+m=which.min(cv.mtry.test)
+
+# now choosing best number of trees
+t=seq(from=100,to=1000,by=100)
+cv.tree.test=rep(NA,length(t))
+for (j in 1:length(t)){
+    for (i in 1:k){
+      start=((i-1)*n+1) #start of subset
+      end=(i*n) #end of subset
+      test=start:end #range of subset
+      
+      cv.train=data2[-test,]
+      cv.test=data2[test,]
+      
+      fit=randomForest(magnitude~.,data=cv.train,mtry=m,ntree=t[j])
+      prediction=predict(fit,newdata=cv.test[,-1])
+      err[i]=mean((prediction-cv.test[,1])^2)
+      
+    }
+    cv.tree.test[j]=mean(err)
+  }
+plot(t,cv.tree.test,pch=19,col=1,type="b",ylab="CV Error",
+     xlab="Number of Trees")
+numTrees=t[which.min(cv.tree.test)]
+
+
+##model corresponding to the best parameters  
+tree.best=randomForest(magnitude~.,data=data2,mtry=m,ntree=numTrees)
+tree.best
+
+yhat.rf=predict(tree.best, newdata = data2)
+errors.rf=magnitude-yhat.rf
+
+plot(yhat.rf,errors.rf)
+loess.line = loess(errors.rf~yhat.rf)
+lines(loess.line$x[order(loess.line$x)],loess.line$fitted[order(loess.line$x)],
+      col="red")
+lines(c(0,8),c(0,0),lty=2,col="grey")
+
+r2 = (sum((data2$magnitude- mean(data2$magnitude))^2) - sum(errors.rf^2))/
+  sum((data2$magnitude - mean(data2$magnitude))^2)
+r2
+
+################################################################################
+#######################         GBM          ###################################
+################################################################################
+#finding best lambda
+
+lam=10^seq(-10,-1,by=0.1)
+cv.err=rep(NA,length(lam))
+for(j in 1:length(lam)){
+  for (i in 1:k){
+    start=((i-1)*n+1) #start of subset
+    end=(i*n) #end of subset
+    test=start:end #range of subset
+    
+    cv.train=data2[-test,]
+    cv.test=data2[test,]
+    fit=gbm(magnitude~., data=cv.train,distribution = "gaussian",
+            n.trees = 1000,shrinkage = lam[j])
+    prediction=predict(fit,newdata=cv.test[,-1],n.trees=1000)
+    err[i]=mean((prediction-cv.test$magnitude)^2)
+  }
+  cv.err[j]=mean(err)
+}
+min(cv.err)
+lambda=lam[which.min(cv.err)]
+plot(lam,cv.err,type="b",xlab="Shrinkage",ylab="CV Error",col="blue",pch=19)
+
+#now using that lambda
+boost1=gbm(magnitude~.,data=data2,distribution = "gaussian", n.trees=1000,
+           interaction.depth = 4, shrinkage =lambda)
+
+summary(boost1) #fault depth is by far the most important variable
+
+yhat.boost=boost1$fit
+errors.boost=magnitude-yhat.boost
+
+plot(yhat.boost,errors.boost)
+loess.line = loess(errors.boost~yhat.boost)
+lines(loess.line$x[order(loess.line$x)],loess.line$fitted[order(loess.line$x)],
+      col="red")
+lines(c(0,8),c(0,0),lty=2,col="grey")
+
+hist(errors.boost)
+
+r2 = (sum((data2$magnitude- mean(data2$magnitude))^2) - sum(errors.boost^2))/
+  sum((data2$magnitude - mean(data2$magnitude))^2)
+r2
+
+
+###Choosing the number of trees
+n.trees=seq(from=100,to=1000,by=100)
+predmat=predict(boost1,newdata=data2[-train,],n.trees=n.trees)
+berr=with(data2[-train,],apply((predmat-magnitude)^2,2,mean))
+plot(n.trees,berr,pch=19,ylab="Mean Squared Error", xlab="# Trees",
+     main="Boosting Test Error")
+
+
+##case
+case=data.frame(fault_depth=1.6,fault_length=67,fault_angle=13,volcano=1)
+case
+numtrees=seq(from=100,to=1000,by=1)
+
+pred=predict(boost1,newdata = case, n.trees = numtrees)
+cbind(min(pred),max(pred))
+plot(numtrees,pred)
+
+
+#splitting the magnitude into classes we can warn people how much damage the
+#earthquake may cause
+#n=length(magnitude)
+#magClass=cut(magnitude,c(0,5.4,6.0,6.9,max(magnitude)),
+#             labels = c("light",
+#                        "moderate",
+#                        "strong",
+#                        "major"))
+#classes taken from http://www.geo.mtu.edu/UPSeis/magnitude.html
+#summary(magClass)
+
+#data.w.cat=data.frame(data2[,-1],magClass)
+
+#tree1=randomForest(magClass~.,data=data.w.cat[train,],mtry=4,ntree=50)
+#tree1
+#yhat.bag = predict(tree1,newdata=data.w.cat[-train,])
+#table(yhat.bag,magClass[-train])
